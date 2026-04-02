@@ -8,12 +8,13 @@
 
 #define FILEPATH "passwords.csv"
 #define MAXLEN 50
-#define HASHLEN 50
+#define HASHLEN 16
 #define SALTLEN 16
+#define MAXPASSWORDS 256
 
 typedef struct Map{
-    char *key[256];
-    char *value[256];
+    char *key[MAXPASSWORDS];
+    char *value[MAXPASSWORDS];
     size_t size;
     int ptr;
 }Map;
@@ -21,9 +22,9 @@ typedef struct Map{
 /*Function Declarations*/
 FILE* login(void);
 Map* alloc_map(void);
-int load_file(FILE *fptr);
+int load_file(FILE *fptr, Map *map);
 int get_line(char *prompt, char *buffer, size_t bufsize);
-int read_credentials(FILE *fptr, char *user_buffer, char *password_buffer);
+int read_credentials(FILE *fptr, char *key_buffer, char *password_buffer);
 int hash_password(char *password_buffer, char* hashed_password);
 int gen_hash(uint8_t salt_buffer, size_t salt_len);
 int map_insert(Map *map, char *key, char *value);
@@ -54,10 +55,12 @@ main()
         printf("error: map couldn't be allocated");
         return -1;
     }
-    map_insert(map, "matheus", "mughy");
-    map_insert(map, "vitoria", "alegre");
+
+    load_file(fptr, map);
     print_map(map);
 
+    free(fptr);
+    free(map);
     return 0;
 }
 
@@ -81,9 +84,7 @@ login(void)
         if(!fptr){
             return NULL;
         }
-        err = get_line("Register username: ", input_username, sizeof(input_username));
-        err = get_line("Register password: ", input_password, sizeof(input_password));
-        //write to stderr
+        printf("Register:\n");
     }
 
     err = get_line("username: ", input_username, sizeof(input_username));
@@ -104,7 +105,7 @@ login(void)
         return NULL;
     }
 
-    printf("User Logged in\n");
+    //printf("User Logged in\n");
     return fptr;
 }
 
@@ -162,19 +163,19 @@ hash_password(char *password, char *hashed_password)
     }
     //possivel usar memset para isso? memset(salt, RANDOM, saltlen)
     
-    argon2id_hash_raw(t_cost, m_cost, parallelism, password, password_len, salt, SALTLEN, hash1, HASHLEN);
-    for(int i = 0; i < HASHLEN; i++){
-        printf("%c", hash1[i]);
-    }
+    //argon2id_hash_raw(t_cost, m_cost, parallelism, password, password_len, salt, SALTLEN, hash1, HASHLEN);
     return 0;
 }
 
 int
-load_file(FILE *fptr)
+load_file(FILE *fptr, Map *map)
 {
-    char id_key[MAXLEN];
-    char hashed_password[MAXLEN];
+    char key_str[MAXLEN];
+    char hash[MAXLEN];
 
+    while(read_credentials(fptr, key_str, hash) != EOF){
+        map_insert(map, key_str, hash);
+    }
     return 0;
 }
 
@@ -207,17 +208,20 @@ get_line(char *prompt, char *buffer, size_t bufsize)
     return 0;
 }
 
-int read_credentials(FILE *fptr, char *usr_buffer, char *passwd_buffer)
+int 
+read_credentials(FILE *fptr, char *key_buffer, char *passwd_buffer)
 {
     char line_buffer[100];
     int i, j;
 
-    fscanf(fptr, "%s", line_buffer);
+    if(fscanf(fptr, "%s", line_buffer) == EOF){
+        return EOF;
+    }
 
     for(i = 0; line_buffer[i] != ','; i++){
-        usr_buffer[i] = line_buffer[i];
+        key_buffer[i] = line_buffer[i];
     }
-    usr_buffer[i] = '\0';
+    key_buffer[i] = '\0';
 
     i += 1;
     for(j = 0; line_buffer[i] != '\0' && line_buffer[i] != '\n'; i++, j++){
@@ -235,7 +239,7 @@ alloc_map(void)
     if(map == NULL){
         return NULL;
     }
-    map->size = 265;
+    map->size = MAXPASSWORDS;
     map->ptr = 0;
 
     return map;
@@ -244,15 +248,13 @@ alloc_map(void)
 int
 map_insert(Map *map, char *key, char *value)
 {
-    if((size_t)map->ptr >= map->size){
-        map = realloc(map, map->size * 2);
-        if(map == NULL){
-            return -1;
-        }
+    if(map->ptr >= MAXPASSWORDS){
+        return -1;
     }
-    map->key[map->ptr] = key;
-    map->value[map->ptr] = value;
-    map->ptr += 1;
+    map->key[map->ptr] = strdup(key);
+    map->value[map->ptr] = strdup(value);
+    map->ptr++;
+
     return 0;
 }
 
@@ -271,15 +273,15 @@ map_get(Map *map, char *key)
 void
 print_map(Map *map)
 {
-    int pwd_size;
-    for(int i = 0; i < map->ptr; i++){
-        printf("%d. %s | ", i+1, map->key[i]);
-        pwd_size = strlen(map->value[i]);
+    int pwd_len = 0;
 
-        for(int j = 0; j < pwd_size; j++){
+    for(int i = 0; i < map->ptr; i++){
+        printf("%d. %s\t| ", i+1, map->key[i]);
+        pwd_len = strlen(map->value[i]);
+
+        for(int j = 0; j < pwd_len; j++){
             printf("*");
         }
-
         printf("\n");
     }
 }
