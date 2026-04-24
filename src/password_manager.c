@@ -4,33 +4,27 @@
 #include <errno.h>
 #include <sys/random.h>
 #include <ncurses.h>
+#include "map.h"
 #include "argon2.h"
 
 #define FILEPATH "passwords.csv"
 #define MAXLEN 50
 #define HASHLEN 16
 #define SALTLEN 16
-#define MAXPASSWORDS 256
-
-typedef struct Map{
-    char *key[MAXPASSWORDS];
-    char *value[MAXPASSWORDS];
-    size_t size;
-    int ptr;
-}Map;
+#define NR 10
+#define defer_return(value) do{ status = value; goto defer;} while(0);
 
 /*Function Declarations*/
 FILE* login(void);
-Map* alloc_map(void);
 int load_file(FILE *fptr, Map *map);
 int get_line(char *prompt, char *buffer, size_t bufsize);
 int read_credentials(FILE *fptr, char *key_buffer, char *password_buffer);
-int hash_password(char *password_buffer, char* hashed_password);
-int gen_hash(uint8_t salt_buffer, size_t salt_len);
-int map_insert(Map *map, char *key, char *value);
+int encrypt_password(char *password_buffer, char* hashed_password);
+int gen_key(char *plaintext, uint8_t key[]);
+int gen_salt(uint8_t buf[], size_t bufsize);
 char* gen_password(char *buf, size_t bufsize);
-char* map_get(Map *map, char *key);
-void print_map(Map *map);
+void add_round_key(uint8_t state[4][4]);
+void key_expansion(uint8_t key[], uint32_t words[]);
 
 /**
  *  NOTES:
@@ -42,70 +36,126 @@ void print_map(Map *map);
 int
 main()
 {
-    FILE *fptr;
-    Map *map;
+    FILE *fptr = NULL;
+    Map *map = NULL;
+    int status = 0;
 
     fptr = login();
     if(fptr == NULL){
-        printf("\nerror: Could not open or create file. Aborting\n");
         return -1;
     }
-    map = alloc_map();
+
     if(map == NULL){
-        printf("error: map couldn't be allocated");
-        return -1;
+        defer_return(-1);
     }
 
     load_file(fptr, map);
     print_map(map);
 
-    free(fptr);
+    encrypt_password("password", "seis nove");
+
+    fclose(fptr);
     free(map);
     return 0;
+
+defer:
+    free(map);
+    if(fptr != NULL) fclose(fptr);
+    return status;
 }
 
 /*Application Logic Functions */
+int
+encrypt_password(char *plaintext, char *cypher_text)
+{
+    int rounds = 10;
+    uint8_t key[16];
+    uint8_t state[4][4];
+    uint32_t words[44];
+    int idx;
+
+    gen_key(plaintext, key);
+    key_expansion(key, words);
+    idx = 0;
+    for(int row = 0; row < 4; row++){
+        for(int column = 0; column < 4; column++){
+            state[row][column] = key[idx];
+            idx += 4;
+        }
+        idx = idx - 12;
+    }    
+
+    return 0;
+}
+
+void
+key_expansion(uint8_t key[], uint32_t words[])
+{
+    uint32_t round_const[] = {
+        0x01, 0x02, 0x04, 0x08, 0x10,
+        0x20, 0x40, 0x80, 0x1b, 0x36
+    };
+
+    printf("rc: [%x]", round_const[2]);
+}
+
+void
+add_round_key(uint8_t state[4][4])
+{
+
+}
+
+int
+gen_key(char *plaintext, uint8_t key[])
+{
+    uint8_t *text = (uint8_t *)strdup(plaintext);
+    int pwdlen = strlen(plaintext);
+    uint8_t salt[SALTLEN];
+
+    memset(salt, 0x30, SALTLEN);
+
+    uint32_t time_cost = 2;
+    uint32_t mem_cost = (1 << 16);
+    uint32_t parallelism = 1;
+
+    argon2id_hash_raw(time_cost, mem_cost, parallelism, text, pwdlen, salt, SALTLEN, key, HASHLEN);
+
+    memset(text, 0, pwdlen);
+    free(text);
+    return 0;
+}
 
 //Refatorar sem duvidas
 FILE*
 login(void)
 {
-    char input_username[MAXLEN];
-    char input_password[MAXLEN];
+    char stored_username[MAXLEN];
+    char stored_password[MAXLEN];
     char username[MAXLEN];
     char password[MAXLEN];
-    char hashed_password[MAXLEN];
-    int err;
-
-    FILE *fptr = fopen(FILEPATH, "r");
+    FILE *fptr;
+    fptr = fopen(FILEPATH, "r");
 
     if(!fptr){
         fptr = fopen(FILEPATH, "w");
-        if(!fptr){
-            return NULL;
-        }
-        printf("Register:\n");
+
+        get_line("Register username: ", username, sizeof(username));
+        get_line("Register password: ", password, sizeof(password));
+        fprintf(fptr, "%s,%s\n", username, password);
+        read_credentials(fptr, stored_username, stored_password);
+        fclose(fptr);
     }
+    fptr = fopen(FILEPATH, "r");
 
-    err = get_line("username: ", input_username, sizeof(input_username));
-    err = get_line("password: ", input_password, sizeof(input_password));
+    get_line("username: ", username, sizeof(username));
+    get_line("password: ", password, sizeof(password));
+    read_credentials(fptr, stored_username, stored_password);
 
-    read_credentials(fptr, username, password);
-    hash_password(password, hashed_password);
-
-
-    //trocar para wrong password or username depois de testar se ta tudo funcionando
-    if(strcmp(input_username, username) != 0){
-        printf("\nWrong username");
+    if(strcmp(stored_username, username) != 0 || strcmp(stored_password, password) != 0){
+        fprintf(stderr, "error: wrong credentials\n");
         return NULL;
     }
 
-    if(strcmp(input_password, password) != 0){
-        printf("\nWrong password");
-        return NULL;
-    }
-
-    //printf("User Logged in\n");
     return fptr;
 }
 
@@ -135,35 +185,12 @@ gen_password(char *buf, size_t bufsize)
 }
 
 int
-gen_salt(uint8_t salt_buf[], size_t saltlen)
+gen_salt(uint8_t buf[], size_t bufsize)
 {
     ssize_t bytes;
+    bytes = getrandom(buf, sizeof(char)*bufsize, GRND_NONBLOCK);
+    if(bytes == -1) return -1;
 
-    bytes = getrandom(salt_buf, sizeof(uint8_t)*saltlen, GRND_NONBLOCK);
-
-    if(bytes == -1){
-        return -1;
-    }
-
-    return 0;
-}
-
-int
-hash_password(char *password, char *hashed_password)
-{
-    uint8_t hash1[HASHLEN];
-    uint8_t salt[SALTLEN];
-    uint32_t t_cost = 2;        //n pass computatiom
-    uint32_t m_cost = (1 << 16);//memory usage
-    uint32_t parallelism = 1;   //threads
-    uint32_t password_len = strlen((char*)password);
-
-    if(gen_salt(salt, SALTLEN) == -1){
-        return -1;
-    }
-    //possivel usar memset para isso? memset(salt, RANDOM, saltlen)
-    
-    //argon2id_hash_raw(t_cost, m_cost, parallelism, password, password_len, salt, SALTLEN, hash1, HASHLEN);
     return 0;
 }
 
@@ -232,56 +259,3 @@ read_credentials(FILE *fptr, char *key_buffer, char *passwd_buffer)
     return 0;
 }
 
-Map*
-alloc_map(void)
-{
-    Map *map = (Map*)malloc(sizeof(Map));
-    if(map == NULL){
-        return NULL;
-    }
-    map->size = MAXPASSWORDS;
-    map->ptr = 0;
-
-    return map;
-}
-
-int
-map_insert(Map *map, char *key, char *value)
-{
-    if(map->ptr >= MAXPASSWORDS){
-        return -1;
-    }
-    map->key[map->ptr] = strdup(key);
-    map->value[map->ptr] = strdup(value);
-    map->ptr++;
-
-    return 0;
-}
-
-char*
-map_get(Map *map, char *key)
-{
-    int idx;
-    for(idx = 0; idx < map->ptr; idx++){
-        if(strcmp(key, map->key[idx]) == 0){
-            return map->value[idx];
-        }
-    }
-    return NULL;
-}
-
-void
-print_map(Map *map)
-{
-    int pwd_len = 0;
-
-    for(int i = 0; i < map->ptr; i++){
-        printf("%d. %s\t| ", i+1, map->key[i]);
-        pwd_len = strlen(map->value[i]);
-
-        for(int j = 0; j < pwd_len; j++){
-            printf("*");
-        }
-        printf("\n");
-    }
-}
